@@ -46,6 +46,7 @@ PING_COUNT=0
 PING_SUCCESS=0
 TOTAL_DOWNTIME=0
 INCIDENT_COUNT=0
+UPTIME_START_EPOCH=0
 
 INCIDENT_FILE="/tmp/checkup_incidents_$$.tmp"
 ON_LIVE_LINE=false
@@ -286,6 +287,7 @@ main() {
 
     if [[ "$STATE" == "UP" ]]; then
         PING_SUCCESS=$(( PING_SUCCESS + 1 ))
+        UPTIME_START_EPOCH=$(date +%s)
         print_line "${GREEN}${BOLD}[  UP  ]${RESET}  Host is ${GREEN}ALIVE${RESET}"
     else
         DOWNTIME_START_TS=$(date '+%Y-%m-%d %H:%M:%S')
@@ -312,6 +314,7 @@ main() {
         if [[ "$STATE" == "UP" && "$new_state" == "DOWN" ]]; then
             DOWNTIME_START_TS="$now"
             DOWNTIME_START_EPOCH="$now_epoch"
+            UPTIME_START_EPOCH=0
             echo
             separator
             print_line "${RED}${BOLD}[ DOWN ]${RESET}  Host went ${RED}UNREACHABLE${RESET}"
@@ -330,11 +333,16 @@ main() {
             print_sub  "  Total down : ${YELLOW}$(fmt_long "$dur")${RESET}"
             separator
             echo
+            UPTIME_START_EPOCH="$now_epoch"
             echo "${DOWNTIME_START_TS}|${now}|${dur}" >> "$INCIDENT_FILE"
 
         # Steady UP — live status ticker
         elif [[ "$STATE" == "UP" && "$new_state" == "UP" ]]; then
-            live_line "${GREEN}●${RESET}  ${now}  Host is ${GREEN}ALIVE${RESET}"
+            local up_for=""
+            if (( UPTIME_START_EPOCH > 0 )); then
+                up_for="  up $(fmt_short $(( now_epoch - UPTIME_START_EPOCH )))"
+            fi
+            live_line "${GREEN}●${RESET}  ${now}  Host is ${GREEN}ALIVE${RESET}${DIM}${up_for}${RESET}"
 
         # Steady DOWN — elapsed counter
         elif [[ "$STATE" == "DOWN" && "$new_state" == "DOWN" ]]; then
