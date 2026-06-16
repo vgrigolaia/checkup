@@ -66,6 +66,7 @@ class CheckupMonitor:
         self.session_start   = datetime.now()
         self.is_up           = None          # None = not yet checked
         self.downtime_start  = None
+        self.uptime_start    = None          # when the current UP streak began
         self.downtime_events = []
 
         self.ping_count   = 0
@@ -327,6 +328,7 @@ class CheckupMonitor:
             # ── First check: establish baseline ──────────────────────
             if self.is_up is None:
                 if is_up:
+                    self.uptime_start = now
                     self.log(
                         f"{_c(_Color.GREEN + _Color.BOLD, '[  UP  ]')}  "
                         f"Host is {_c(_Color.GREEN, 'ALIVE')}{rtt_str}"
@@ -344,6 +346,7 @@ class CheckupMonitor:
             # ── UP → DOWN ────────────────────────────────────────────
             elif self.is_up and not is_up:
                 self.downtime_start = now
+                self.uptime_start   = None
                 self._newline_if_live()
                 print()
                 self._separator("─")
@@ -356,8 +359,9 @@ class CheckupMonitor:
 
             # ── DOWN → UP ────────────────────────────────────────────
             elif not self.is_up and is_up:
-                duration  = (now - self.downtime_start).total_seconds()
-                lost_str  = self.downtime_start.strftime("%Y-%m-%d %H:%M:%S")
+                duration          = (now - self.downtime_start).total_seconds()
+                lost_str          = self.downtime_start.strftime("%Y-%m-%d %H:%M:%S")
+                self.uptime_start = now
                 print()
                 self._separator("─")
                 self.log(
@@ -381,9 +385,12 @@ class CheckupMonitor:
 
             # ── Steady UP: live ticker ────────────────────────────────
             elif self.is_up and is_up:
+                up_for = ""
+                if self.uptime_start:
+                    up_for = f"  up {self._fmt((now - self.uptime_start).total_seconds(), short=True)}"
                 self._live(
                     _c(_Color.GREEN, "●") +
-                    f"  {ts_short}  Host is {_c(_Color.GREEN, 'ALIVE')}{rtt_str}"
+                    f"  {ts_short}  Host is {_c(_Color.GREEN, 'ALIVE')}{rtt_str}{_c(_Color.DIM, up_for)}"
                 )
 
             # ── Steady DOWN: live elapsed counter ────────────────────
