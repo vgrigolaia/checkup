@@ -15,7 +15,7 @@
 
 set -uo pipefail
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 
 # ---------------------------------------------------------------------------
 # ANSI colors — disabled when stdout is not a TTY
@@ -32,6 +32,7 @@ fi
 # Globals
 # ---------------------------------------------------------------------------
 TARGET=""
+PORT=""          # TCP port — empty means ICMP ping
 INTERVAL=2
 LOG_FILE=""
 
@@ -139,14 +140,27 @@ fmt_long() {
 }
 
 # ---------------------------------------------------------------------------
-# Ping
+# Check (ICMP ping or TCP connect)
 # ---------------------------------------------------------------------------
 do_ping() {
-    if ping -c 1 -W 2 "$TARGET" >/dev/null 2>&1; then
-        echo "UP"
+    if [[ -n "$PORT" ]]; then
+        # TCP connect check via /dev/tcp (bash built-in, no extra deps)
+        if (timeout 2 bash -c "echo >/dev/tcp/${TARGET}/${PORT}") >/dev/null 2>&1; then
+            echo "UP"
+        else
+            echo "DOWN"
+        fi
     else
-        echo "DOWN"
+        if ping -c 1 -W 2 "$TARGET" >/dev/null 2>&1; then
+            echo "UP"
+        else
+            echo "DOWN"
+        fi
     fi
+}
+
+check_label() {
+    if [[ -n "$PORT" ]]; then echo "TCP:${PORT}"; else echo "ICMP"; fi
 }
 
 # ---------------------------------------------------------------------------
@@ -159,6 +173,7 @@ print_header() {
     echo -e "${BOLD}${WHITE}  checkup  —  Network Uptime Monitor${RESET}"
     echo -e "${BOLD}${CYAN}$(printf '=%.0s' $(seq 1 $w))${RESET}"
     print_line "  Target          : ${WHITE}${TARGET}${RESET}"
+    print_line "  Check Method    : ${WHITE}$(check_label)${RESET}"
     print_line "  Session Started : ${WHITE}${SESSION_START}${RESET}"
     print_line "  Ping Interval   : ${WHITE}${INTERVAL}s${RESET}"
     [[ -n "$LOG_FILE" ]] && print_line "  Log File        : ${WHITE}${LOG_FILE}${RESET}"
@@ -224,12 +239,14 @@ Usage: checkup.sh <TARGET> [OPTIONS]
 
 Continuously monitor network connectivity to a host.
 Shows when it goes down, for how long, and when it comes back up.
+Use --port for a TCP connect check instead of ICMP ping.
 
 Arguments:
   TARGET              IP address or hostname to monitor
 
 Options:
-  -i, --interval SEC  seconds between pings (default: 2, minimum: 1)
+  -i, --interval SEC  seconds between checks (default: 2, minimum: 1)
+  -p, --port PORT     TCP port to check instead of ICMP ping
   -l, --log FILE      append plain-text log to FILE
       --no-color      disable ANSI color output
   -v, --version       print version and exit
@@ -238,7 +255,8 @@ Options:
 Examples:
   checkup.sh 8.8.8.8
   checkup.sh 10.20.20.10 --interval 1
-  checkup.sh 192.168.1.1 --interval 2 --log uptime.log
+  checkup.sh google.com --port 443
+  checkup.sh 192.168.1.1 --port 22 --interval 2 --log uptime.log
 EOF
 }
 
@@ -257,6 +275,7 @@ parse_args() {
     while (( $# > 0 )); do
         case "$1" in
             -i|--interval) INTERVAL="${2:?'--interval requires a value'}"; shift 2 ;;
+            -p|--port)     PORT="${2:?'--port requires a value'}"; shift 2 ;;
             -l|--log)      LOG_FILE="${2:?'--log requires a value'}"; shift 2 ;;
             --no-color)    disable_color; shift ;;
             *) echo "Unknown option: $1" >&2; print_usage; exit 1 ;;
