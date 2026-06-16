@@ -112,8 +112,18 @@ class CheckupMonitor:
         print(f"\r  {message}   ", end="", flush=True)
         self._on_live_line = True
 
-    def _separator(self, char: str = "-", width: int = 60) -> None:
-        self.log(_c(_Color.DIM, char * width), raw=True)
+    def _print_sub(self, message: str) -> None:
+        """Print an indented detail line (no timestamp) below a print_line call."""
+        self._newline_if_live()
+        line = f"            {message}"
+        print(line)
+        self._write_file(_strip_ansi(line))
+
+    def _separator(self, char: str = "─", width: int = 58) -> None:
+        self._newline_if_live()
+        line = f"  {_c(_Color.DIM, char * width)}"
+        print(line)
+        self._write_file(_strip_ansi(line))
 
     # ------------------------------------------------------------------
     # Ping
@@ -230,9 +240,10 @@ class CheckupMonitor:
                 restored_str = ev["restored_at"].strftime("%Y-%m-%d %H:%M:%S")
                 dur_str      = self._fmt(ev["duration"])
                 print()
-                self.log(f"  [{idx}] LOST     : {_c(_Color.RED,    lost_str)}")
-                self.log(f"      RESTORED : {_c(_Color.GREEN,  restored_str)}")
-                self.log(f"      Duration : {_c(_Color.YELLOW, dur_str)}")
+                self._print_sub(_c(_Color.BOLD, f"Incident #{idx}"))
+                self._print_sub(f"  Went DOWN  : {_c(_Color.RED,    lost_str)}")
+                self._print_sub(f"  Came UP    : {_c(_Color.GREEN,  restored_str)}")
+                self._print_sub(f"  Down for   : {_c(_Color.YELLOW, dur_str)}")
 
         print()
         print(_c(_Color.BOLD + _Color.CYAN, "=" * 60))
@@ -309,36 +320,56 @@ class CheckupMonitor:
                 if rtt is not None:
                     self.rtt_samples.append(rtt)
 
-            rtt_str = f"  RTT {rtt:.1f} ms" if (is_up and rtt is not None) else ""
+            ts       = now.strftime("%Y-%m-%d %H:%M:%S")
+            ts_short = now.strftime("%H:%M:%S")
+            rtt_str  = f"  (RTT: {rtt:.1f} ms)" if (is_up and rtt is not None) else ""
 
             # ── First check: establish baseline ──────────────────────
             if self.is_up is None:
-                status = _c(_Color.GREEN + _Color.BOLD, "UP") if is_up else _c(_Color.RED + _Color.BOLD, "DOWN")
-                self.log(f"[INFO]  Initial status: {status}{rtt_str}")
+                if is_up:
+                    self.log(
+                        f"{_c(_Color.GREEN + _Color.BOLD, '[  UP  ]')}  "
+                        f"Host is {_c(_Color.GREEN, 'ALIVE')}{rtt_str}"
+                    )
+                else:
+                    self.downtime_start = now
+                    self._separator("─")
+                    self.log(
+                        f"{_c(_Color.RED + _Color.BOLD, '[ DOWN ]')}  "
+                        f"Host is {_c(_Color.RED, 'UNREACHABLE')}"
+                    )
+                    self._print_sub(f"  Down since : {_c(_Color.RED, ts)}")
+                    self._separator("─")
 
             # ── UP → DOWN ────────────────────────────────────────────
             elif self.is_up and not is_up:
                 self.downtime_start = now
-                print()  # end any live line
-                self._on_live_line = False
+                self._newline_if_live()
+                print()
                 self._separator("─")
                 self.log(
-                    _c(_Color.RED + _Color.BOLD,
-                       f"[ALERT] Connection LOST at: {now.strftime('%Y-%m-%d %H:%M:%S')}")
+                    f"{_c(_Color.RED + _Color.BOLD, '[ DOWN ]')}  "
+                    f"Host went {_c(_Color.RED, 'UNREACHABLE')}"
                 )
+                self._print_sub(f"  Down since : {_c(_Color.RED, ts)}")
                 self._separator("─")
 
             # ── DOWN → UP ────────────────────────────────────────────
             elif not self.is_up and is_up:
-                duration = (now - self.downtime_start).total_seconds()
+                duration  = (now - self.downtime_start).total_seconds()
+                lost_str  = self.downtime_start.strftime("%Y-%m-%d %H:%M:%S")
+                print()
                 self._separator("─")
                 self.log(
-                    _c(_Color.GREEN + _Color.BOLD,
-                       f"[INFO]    Connection RESTORED at: {now.strftime('%Y-%m-%d %H:%M:%S')}")
+                    f"{_c(_Color.GREEN + _Color.BOLD, '[  UP  ]')}  "
+                    f"Host is {_c(_Color.GREEN, 'BACK ONLINE')}"
                 )
-                self.log(
-                    _c(_Color.YELLOW,
-                       f"[SUMMARY] Total Downtime Duration: {self._fmt(duration)}")
+                self._print_sub(f"  Came back  : {_c(_Color.GREEN, ts)}")
+                self._print_sub(
+                    f"  Was down   : {_c(_Color.RED, lost_str)}  →  {_c(_Color.GREEN, ts)}"
+                )
+                self._print_sub(
+                    f"  Total down : {_c(_Color.YELLOW, self._fmt(duration))}"
                 )
                 self._separator("─")
                 print()
@@ -352,15 +383,15 @@ class CheckupMonitor:
             elif self.is_up and is_up:
                 self._live(
                     _c(_Color.GREEN, "●") +
-                    f"  {now.strftime('%H:%M:%S')}{rtt_str}"
+                    f"  {ts_short}  Host is {_c(_Color.GREEN, 'ALIVE')}{rtt_str}"
                 )
 
-            # ── Steady DOWN: live "still down" counter ────────────────
+            # ── Steady DOWN: live elapsed counter ────────────────────
             elif not self.is_up and not is_up:
                 elapsed = (now - self.downtime_start).total_seconds()
                 self._live(
-                    _c(_Color.RED, "●") +
-                    f"  {now.strftime('%H:%M:%S')}  still DOWN — {self._fmt(elapsed, short=True)}"
+                    _c(_Color.RED, "✗") +
+                    f"  {ts_short}  Still {_c(_Color.RED, 'DOWN')} — {self._fmt(elapsed, short=True)}"
                 )
 
             self.is_up = is_up
