@@ -2,7 +2,7 @@
 """
 checkup — Lightweight Network Uptime Monitor
 Zero external dependencies. Python 3.6+ standard library only.
-https://github.com/your-username/checkup
+https://github.com/vgrigolaia/checkup
 """
 
 import argparse

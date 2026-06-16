@@ -4,7 +4,7 @@
 # Zero dependencies — uses only standard POSIX/Linux utilities:
 #   ping, date, awk, grep, sleep, bc (optional — for sub-second intervals)
 #
-# https://github.com/your-username/checkup
+# https://github.com/vgrigolaia/checkup
 #
 # Usage:
 #   checkup.sh <TARGET> [OPTIONS]

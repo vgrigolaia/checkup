@@ -29,7 +29,7 @@
 
 ```bash
 # Clone
-git clone https://github.com/your-username/checkup.git
+git clone https://github.com/vgrigolaia/checkup.git
 cd checkup
 
 # Make executable
