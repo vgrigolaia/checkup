@@ -1,4 +1,4 @@
-# checkup — Network Uptime Monitor
+# checkup — Network Host Uptime Monitor
 
 > Lightweight, zero-dependency network uptime monitor for Linux.  
 > Detects outages, measures downtime, tracks multiple hosts, and produces clean human-readable reports — with no extra `pip install` required.
@@ -7,7 +7,7 @@
 [![Python 3.6+](https://img.shields.io/badge/python-3.6%2B-blue.svg)](https://www.python.org/)
 [![Shell: Bash 4+](https://img.shields.io/badge/shell-bash%204%2B-green.svg)](https://www.gnu.org/software/bash/)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
-[![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](https://github.com/vgrigolaia/checkup/releases)
+[![Version](https://img.shields.io/badge/version-1.3.0-blue.svg)](https://github.com/vgrigolaia/checkup/releases)
 
 ---
 
@@ -16,12 +16,14 @@
 - **Zero dependencies** — Python standard library only; no `pip install` ever needed to run
 - **Multi-host monitoring** — watch multiple IPs/hostnames in a single live table
 - **TCP port check** — connect to a specific port instead of ICMP ping (useful for hosts that block ping)
+- **HTTP/HTTPS check** — verify web endpoints return a valid response, with status code display
+- **RTT threshold alerts** — get warned in real time when latency exceeds your limit
 - **Dual implementation** — Python (`checkup.py`) and Bash (`checkup.sh`) versions
 - **Live status table** — auto-refreshing table with RTT, status, and uptime/downtime per host
 - **Uptime streak counter** — shows how long the host has been continuously online
 - **Instant outage detection** — timestamps connection loss to the second
 - **Downtime duration** — calculates and prints elapsed downtime for every incident
-- **Session summary** — packet loss %, RTT min/avg/max, and a full incident log on exit
+- **Session summary** — packet loss %, RTT min/avg/max, RTT spike count, and full incident log on exit
 - **Log file support** — append all events to a plain-text file (ANSI stripped automatically)
 - **Color output** — ANSI colors auto-disabled when piped or redirected
 - **Graceful shutdown** — `Ctrl+C` always prints a complete per-host summary before exiting
@@ -109,6 +111,12 @@ checkup 8.8.8.8 1.1.1.1 192.168.1.1
 # TCP port check per host
 checkup google.com:443 10.0.0.1:22
 
+# HTTP/HTTPS endpoint check
+checkup https://mysite.com
+
+# Alert if RTT exceeds 150ms
+checkup 8.8.8.8 --alert-rtt 150
+
 # Save events to a log file
 checkup 8.8.8.8 --log /var/log/checkup.log
 ```
@@ -123,13 +131,14 @@ checkup 8.8.8.8 --log /var/log/checkup.log
 checkup <TARGET [TARGET ...]> [OPTIONS]
 
 Arguments:
-  TARGET     IP or hostname to monitor. Use host:port for TCP check.
+  TARGET     IP, hostname, host:port, or http(s):// URL to monitor.
              Multiple targets enable multi-host live table mode.
 
 Options:
   -i, --interval SEC    seconds between checks  (default: 2.0, min: 0.5)
   -p, --port PORT       TCP port to check on all hosts
   -l, --log FILE        append plain-text log to FILE
+      --alert-rtt MS    alert when RTT exceeds this threshold (milliseconds)
       --no-color        disable ANSI color output
   -v, --version         print version and exit
   -h, --help            print help and exit
@@ -166,11 +175,18 @@ checkup google.com:443
 # Single host — TCP check via global port flag
 checkup 10.0.0.1 --port 22
 
-# Multi-host — ICMP for all
-checkup 8.8.8.8 1.1.1.1 192.168.1.1
+# HTTP/HTTPS endpoint — checks that the server returns a valid response
+checkup https://mysite.com
+checkup http://192.168.1.1:8080/health
 
-# Multi-host — mixed ICMP and TCP per host
-checkup 8.8.8.8 google.com:443 10.0.0.1:22 192.168.1.1
+# Multi-host — ICMP + TCP + HTTP together
+checkup 8.8.8.8 google.com:443 https://mysite.com
+
+# RTT threshold alert — warn if latency spikes above 100ms
+checkup 8.8.8.8 --alert-rtt 100
+
+# HTTP check with RTT alert — detect slow responses on a web server
+checkup https://mysite.com --alert-rtt 500
 
 # Faster checks — 1-second interval
 checkup 8.8.8.8 --interval 1
@@ -273,9 +289,12 @@ nohup checkup 8.8.8.8 --log /var/log/checkup.log &
 | Syntax | Method | When to use |
 |---|---|---|
 | `checkup 8.8.8.8` | ICMP ping | Default — works for most hosts |
-| `checkup 8.8.8.8 --port 80` | TCP connect | Host blocks ICMP; check HTTP port |
+| `checkup 8.8.8.8 --port 80` | TCP connect | Host blocks ICMP; check a specific port |
 | `checkup google.com:443` | TCP connect | Per-host port in multi-host mode |
-| `checkup.sh host --port 22` | TCP connect | Bash version SSH availability check |
+| `checkup https://mysite.com` | HTTP GET | Web server availability + response code |
+| `checkup http://host:8080/health` | HTTP GET | Internal service health endpoint |
+| `checkup 8.8.8.8 --alert-rtt 100` | ICMP + alert | Detect latency spikes above 100ms |
+| `checkup.sh host --port 22` | TCP connect | Bash version, SSH availability check |
 
 ---
 
@@ -345,6 +364,10 @@ checkup/
 ---
 
 ## Changelog
+
+### v1.3.0
+- **HTTP/HTTPS check** — pass any `http://` or `https://` URL as a target; shows live HTTP status code (200, 404, 503…) in the status column; 2xx/3xx = UP, 4xx/5xx/timeout = DOWN
+- **RTT threshold alerts** — `--alert-rtt MS` warns in real time when latency exceeds your limit; shows `⚠` in the RTT column; logs spike count in session summary
 
 ### v1.2.0
 - **One-line installer** — `curl ... | bash` installs `checkup` system-wide

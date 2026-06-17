@@ -8,7 +8,9 @@ Usage:
   checkup 8.8.8.8
   checkup 8.8.8.8 1.1.1.1 192.168.1.1        # multi-host
   checkup google.com:443 10.0.0.1:22          # TCP port check per host
+  checkup https://mysite.com                  # HTTP/HTTPS check
   checkup 10.0.0.1 --interval 1 --log out.log
+  checkup 8.8.8.8 --alert-rtt 100            # alert if RTT exceeds 100ms
 """
 
 import argparse
@@ -20,10 +22,13 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections import deque
 from datetime import datetime
+from urllib.parse import urlparse
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 # ---------------------------------------------------------------------------
 # ANSI colors
@@ -89,7 +94,7 @@ def fmt_long(secs: float) -> str:
 # ---------------------------------------------------------------------------
 
 def icmp_check(host: str):
-    """ICMP ping via system ping binary. Returns (is_up, rtt_ms)."""
+    """ICMP ping via system ping binary. Returns (is_up, rtt_ms, None)."""
     try:
         proc = subprocess.run(
             ["ping", "-c", "1", "-W", "2", host],
@@ -99,18 +104,18 @@ def icmp_check(host: str):
         )
         if proc.returncode == 0:
             m = re.search(r"time[=<]([\d.]+)\s*ms", proc.stdout.decode())
-            return True, float(m.group(1)) if m else None
-        return False, None
+            return True, float(m.group(1)) if m else None, None
+        return False, None, None
     except subprocess.TimeoutExpired:
-        return False, None
+        return False, None, None
     except FileNotFoundError:
         sys.exit(c(_C.RED, "Error: 'ping' not found on this system."))
     except Exception:
-        return False, None
+        return False, None, None
 
 
 def tcp_check(host: str, port: int):
-    """TCP connect check. Returns (is_up, rtt_ms)."""
+    """TCP connect check. Returns (is_up, rtt_ms, None)."""
     start = time.monotonic()
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -118,9 +123,29 @@ def tcp_check(host: str, port: int):
         err = sock.connect_ex((host, port))
         rtt = (time.monotonic() - start) * 1000
         sock.close()
-        return err == 0, round(rtt, 1) if err == 0 else None
+        return err == 0, round(rtt, 1) if err == 0 else None, None
     except Exception:
-        return False, None
+        return False, None, None
+
+
+def http_check(url: str):
+    """HTTP/HTTPS check. Returns (is_up, rtt_ms, status_code).
+    2xx/3xx responses are UP; connection errors and 4xx/5xx are DOWN.
+    """
+    start = time.monotonic()
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": f"checkup/{__version__}"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            rtt = (time.monotonic() - start) * 1000
+            return True, round(rtt, 1), resp.status
+    except urllib.error.HTTPError as e:
+        rtt = (time.monotonic() - start) * 1000
+        return False, round(rtt, 1), e.code
+    except Exception:
+        return False, None, None
 
 
 # ---------------------------------------------------------------------------
@@ -128,22 +153,27 @@ def tcp_check(host: str, port: int):
 # ---------------------------------------------------------------------------
 
 class HostWatcher:
-    def __init__(self, target: str, port, interval: float, on_event):
-        self.target   = target
-        self.port     = port        # int or None
-        self.interval = interval
-        self.on_event = on_event    # callback(watcher, event_type, now, extra)
+    def __init__(self, target: str, port, url, interval: float, on_event,
+                 alert_rtt=None):
+        self.target    = target
+        self.port      = port       # int or None
+        self.url       = url        # full URL string for HTTP checks, else None
+        self.interval  = interval
+        self.on_event  = on_event   # callback(watcher, event_type, now, extra)
+        self.alert_rtt = alert_rtt  # float ms threshold or None
 
-        self._lock    = threading.Lock()
+        self._lock = threading.Lock()
 
         # State fields (always access under _lock)
-        self.is_up          = None
-        self.last_rtt       = None
-        self.uptime_start   = None
-        self.downtime_start = None
-        self.ping_count     = 0
-        self.ping_success   = 0
-        self.rtt_samples    = []
+        self.is_up           = None
+        self.last_rtt        = None
+        self.last_status     = None   # HTTP status code or None
+        self.rtt_over_limit  = False  # True when last RTT > alert_rtt
+        self.uptime_start    = None
+        self.downtime_start  = None
+        self.ping_count      = 0
+        self.ping_success    = 0
+        self.rtt_samples     = []
         self.downtime_events = []
 
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -153,16 +183,20 @@ class HostWatcher:
 
     @property
     def check_label(self) -> str:
+        if self.url:
+            return "HTTPS" if self.url.startswith("https://") else "HTTP"
         return f"TCP:{self.port}" if self.port else "ICMP"
 
     def _do_check(self):
+        if self.url:
+            return http_check(self.url)
         if self.port:
             return tcp_check(self.target, self.port)
         return icmp_check(self.target)
 
     def _run(self):
         while True:
-            is_up, rtt = self._do_check()
+            is_up, rtt, status = self._do_check()
             now = datetime.now()
 
             with self._lock:
@@ -171,9 +205,21 @@ class HostWatcher:
                     self.ping_success += 1
                     if rtt is not None:
                         self.rtt_samples.append(rtt)
-                self.last_rtt = rtt
-                prev          = self.is_up
-                self.is_up    = is_up
+                self.last_rtt    = rtt
+                self.last_status = status
+                prev             = self.is_up
+                self.is_up       = is_up
+
+                # RTT threshold alert
+                if self.alert_rtt and rtt is not None and is_up:
+                    prev_over           = self.rtt_over_limit
+                    self.rtt_over_limit = rtt > self.alert_rtt
+                    if self.rtt_over_limit and not prev_over:
+                        self.on_event(self, "rtt_alert", now, rtt)
+                    elif not self.rtt_over_limit and prev_over:
+                        self.on_event(self, "rtt_ok", now, rtt)
+                elif not is_up:
+                    self.rtt_over_limit = False
 
                 # First check
                 if prev is None:
@@ -187,6 +233,7 @@ class HostWatcher:
                 elif prev is True and not is_up:
                     self.downtime_start = now
                     self.uptime_start   = None
+                    self.rtt_over_limit = False
                     self.on_event(self, "down", now, None)
 
                 # DOWN → UP
@@ -211,6 +258,9 @@ class HostWatcher:
                 "check_label":     self.check_label,
                 "is_up":           self.is_up,
                 "last_rtt":        self.last_rtt,
+                "last_status":     self.last_status,
+                "rtt_over_limit":  self.rtt_over_limit,
+                "alert_rtt":       self.alert_rtt,
                 "uptime_start":    self.uptime_start,
                 "downtime_start":  self.downtime_start,
                 "ping_count":      self.ping_count,
@@ -225,27 +275,26 @@ class HostWatcher:
 # ---------------------------------------------------------------------------
 
 class TableDisplay:
-    MAX_EVENTS = 8   # recent events shown below the table
+    MAX_EVENTS = 8
 
     def __init__(self, watchers, log_file=None):
         self.watchers    = watchers
         self.log_file    = log_file
         self._events     = deque(maxlen=self.MAX_EVENTS)
         self._lock       = threading.Lock()
-        self._drawn_rows = 0    # how many rows have been drawn (for cursor-up)
+        self._drawn_rows = 0
         self._first_draw = True
 
-        # Column widths (auto-sized to longest target name)
         target_max = max(len(w.target) for w in watchers)
         self._col_target = max(target_max, 15)
-        self._col_check  = 9    # "TCP:65535"
-        self._col_status = 10   # "✗ DOWN"
-        self._col_rtt    = 10   # "1234.5ms"
-        self._col_dur    = 14   # "up 10h 59m 59s"
+        self._col_check  = 9
+        self._col_status = 10
+        self._col_rtt    = 12   # wider for "⚠ 1234.5ms"
+        self._col_dur    = 14
 
     def add_event(self, line: str):
         with self._lock:
-            ts  = datetime.now().strftime("%H:%M:%S")
+            ts    = datetime.now().strftime("%H:%M:%S")
             plain = strip_ansi(line)
             entry = f"  {c(_C.DIM, ts)}  {line}"
             self._events.append(entry)
@@ -276,22 +325,28 @@ class TableDisplay:
     def _format_row(self, snap: dict) -> str:
         now = datetime.now()
 
-        # Status + color
+        # Status column — show HTTP status code when available
         if snap["is_up"] is None:
-            status_str = c(_C.DIM,    pad("...",   self._col_status))
+            status_str = c(_C.DIM, pad("...", self._col_status))
         elif snap["is_up"]:
-            status_str = c(_C.GREEN,  pad("● UP",  self._col_status))
+            label = f"● {snap['last_status']}" if snap["last_status"] else "● UP"
+            status_str = c(_C.GREEN, pad(label, self._col_status))
         else:
-            status_str = c(_C.RED,    pad("✗ DOWN", self._col_status))
+            label = f"✗ {snap['last_status']}" if snap["last_status"] else "✗ DOWN"
+            status_str = c(_C.RED, pad(label, self._col_status))
 
-        # RTT
+        # RTT column — yellow + warning symbol when over threshold
         rtt = snap["last_rtt"]
         if rtt is not None and snap["is_up"]:
-            rtt_str = c(_C.WHITE, pad(f"{rtt:.1f}ms", self._col_rtt))
+            rtt_val = f"{rtt:.1f}ms"
+            if snap["rtt_over_limit"]:
+                rtt_str = c(_C.YELLOW, pad(f"⚠ {rtt_val}", self._col_rtt))
+            else:
+                rtt_str = c(_C.WHITE, pad(rtt_val, self._col_rtt))
         else:
-            rtt_str = c(_C.DIM,   pad("--",           self._col_rtt))
+            rtt_str = c(_C.DIM, pad("--", self._col_rtt))
 
-        # Duration (uptime streak or downtime elapsed)
+        # Duration
         dur_str = c(_C.DIM, pad("--", self._col_dur))
         if snap["is_up"] and snap["uptime_start"]:
             elapsed = (now - snap["uptime_start"]).total_seconds()
@@ -325,7 +380,7 @@ class TableDisplay:
 
     def redraw(self):
         snaps  = [w.snapshot() for w in self.watchers]
-        header = self._header_lines()         # 5 lines
+        header = self._header_lines()
         rows   = [self._format_row(s) for s in snaps]
         w = self._col_target + self._col_check + self._col_status + self._col_rtt + self._col_dur + 10
         footer = [c(_C.DIM, "  " + "─" * w)]
@@ -335,7 +390,6 @@ class TableDisplay:
 
         out = []
         if not self._first_draw:
-            # Move cursor up past everything we drew last time
             out.append(f"\033[{self._drawn_rows}A")
 
         for line in all_lines:
@@ -402,21 +456,26 @@ class SingleDisplay:
         print(c(_C.BOLD + _C.CYAN,  "=" * w))
         print(c(_C.BOLD + _C.WHITE, "  checkup  —  Network Uptime Monitor"))
         print(c(_C.BOLD + _C.CYAN,  "=" * w))
-        self.log(f"  Target          : {c(_C.WHITE, snap['target'])}")
+        target_display = self.watcher.url or snap["target"]
+        self.log(f"  Target          : {c(_C.WHITE, target_display)}")
         self.log(f"  Check           : {c(_C.WHITE, snap['check_label'])}")
         self.log(f"  Session Started : {c(_C.WHITE, ts)}")
         self.log(f"  Ping Interval   : {c(_C.WHITE, str(self.watcher.interval) + 's')}")
+        if self.watcher.alert_rtt:
+            self.log(f"  RTT Alert       : {c(_C.YELLOW, str(self.watcher.alert_rtt) + 'ms')}")
         if self.log_file:
             self.log(f"  Log File        : {c(_C.WHITE, self.log_file)}")
         print(c(_C.BOLD + _C.CYAN,  "-" * w))
         print()
 
     def on_event(self, watcher, event_type: str, now: datetime, extra):
-        ts  = now.strftime("%Y-%m-%d %H:%M:%S")
+        ts = now.strftime("%Y-%m-%d %H:%M:%S")
+
         if event_type == "init":
             rtt_str = f"  (RTT: {extra:.1f} ms)" if extra else ""
             if watcher.is_up:
-                self.log(f"{c(_C.GREEN+_C.BOLD, '[  UP  ]')}  Host is {c(_C.GREEN,'ALIVE')}{rtt_str}")
+                status = f"  HTTP {watcher.last_status}" if watcher.last_status else ""
+                self.log(f"{c(_C.GREEN+_C.BOLD, '[  UP  ]')}  Host is {c(_C.GREEN,'ALIVE')}{rtt_str}{status}")
             else:
                 self.sep()
                 self.log(f"{c(_C.RED+_C.BOLD, '[ DOWN ]')}  Host is {c(_C.RED,'UNREACHABLE')}")
@@ -445,6 +504,19 @@ class SingleDisplay:
             self.sep()
             print()
 
+        elif event_type == "rtt_alert":
+            rtt = extra
+            self._end_live()
+            print()
+            self.log(f"{c(_C.YELLOW+_C.BOLD, '[ SLOW ]')}  RTT spike: "
+                     f"{c(_C.YELLOW, f'{rtt:.1f}ms')} exceeds "
+                     f"{c(_C.YELLOW, f'{watcher.alert_rtt:.0f}ms')} threshold")
+
+        elif event_type == "rtt_ok":
+            rtt = extra
+            self.log(f"{c(_C.GREEN+_C.BOLD, '[  OK  ]')}  RTT back to normal: "
+                     f"{c(_C.GREEN, f'{rtt:.1f}ms')}")
+
     def tick(self):
         snap = self.watcher.snapshot()
         now  = datetime.now()
@@ -452,15 +524,19 @@ class SingleDisplay:
             return
         if snap["is_up"]:
             rtt_str = f"  (RTT: {snap['last_rtt']:.1f} ms)" if snap["last_rtt"] else ""
-            up_for  = ""
+            status_str = f"  HTTP {snap['last_status']}" if snap["last_status"] else ""
+            alert_str  = ""
+            if snap["rtt_over_limit"]:
+                alert_str = c(_C.YELLOW, f"  ⚠ >{snap['alert_rtt']:.0f}ms")
+            up_for = ""
             if snap["uptime_start"]:
                 up_for = c(_C.DIM, "  up " + fmt_short((now - snap["uptime_start"]).total_seconds()))
-            self.live(c(_C.GREEN,"●") + f"  {now.strftime('%H:%M:%S')}  "
-                      f"Host is {c(_C.GREEN,'ALIVE')}{rtt_str}{up_for}")
+            self.live(c(_C.GREEN, "●") + f"  {now.strftime('%H:%M:%S')}  "
+                      f"Host is {c(_C.GREEN,'ALIVE')}{rtt_str}{status_str}{alert_str}{up_for}")
         else:
             if snap["downtime_start"]:
                 elapsed = (now - snap["downtime_start"]).total_seconds()
-                self.live(c(_C.RED,"✗") + f"  {now.strftime('%H:%M:%S')}  "
+                self.live(c(_C.RED, "✗") + f"  {now.strftime('%H:%M:%S')}  "
                           f"Still {c(_C.RED,'DOWN')} — {fmt_short(elapsed)}")
 
     def summary(self, session_start: datetime):
@@ -478,11 +554,14 @@ class SingleDisplay:
         print(c(_C.BOLD + _C.CYAN,  "=" * 60))
         self.log(f"  Ended            : {now.strftime('%Y-%m-%d %H:%M:%S')}")
         self.log(f"  Session Duration : {fmt_long(secs)}")
-        self.log(f"  Pings Sent       : {snap['ping_count']}")
+        self.log(f"  Checks Sent      : {snap['ping_count']}")
         self.log(f"  Packet Loss      : {loss:.1f}%")
         if samples:
             self.log(f"  RTT min/avg/max  : "
                      f"{min(samples):.1f} / {sum(samples)/len(samples):.1f} / {max(samples):.1f} ms")
+        if snap["alert_rtt"]:
+            over = sum(1 for r in samples if r > snap["alert_rtt"])
+            self.log(f"  RTT Alerts       : {over} spike(s) above {snap['alert_rtt']:.0f}ms")
         print()
         events = snap["downtime_events"]
         if not events:
@@ -543,11 +622,14 @@ def multi_summary(watchers, session_start: datetime, log_file=None):
         total_d = sum(e["duration"] for e in events)
 
         print(c(_C.BOLD, f"  [{snap['target']}]  ({snap['check_label']})"))
-        pr(f"    Pings Sent      : {snap['ping_count']}")
+        pr(f"    Checks Sent     : {snap['ping_count']}")
         pr(f"    Packet Loss     : {loss:.1f}%")
         if samples:
             pr(f"    RTT min/avg/max : "
                f"{min(samples):.1f} / {sum(samples)/len(samples):.1f} / {max(samples):.1f} ms")
+        if snap["alert_rtt"]:
+            over = sum(1 for r in samples if r > snap["alert_rtt"])
+            pr(f"    RTT Alerts      : {over} spike(s) above {snap['alert_rtt']:.0f}ms")
         if not events:
             pr(c(_C.GREEN, "    Status: No downtime detected."))
         else:
@@ -568,14 +650,17 @@ def multi_summary(watchers, session_start: datetime, log_file=None):
 # ---------------------------------------------------------------------------
 
 def parse_target(raw: str):
-    """Parse 'host' or 'host:port'. Returns (host, port_or_None)."""
+    """Parse target string. Returns (display_name, port_or_None, url_or_None)."""
+    if raw.startswith(("http://", "https://")):
+        netloc = urlparse(raw).netloc
+        return netloc or raw, None, raw
     if ":" in raw:
         host, port_str = raw.rsplit(":", 1)
         try:
-            return host, int(port_str)
+            return host, int(port_str), None
         except ValueError:
             sys.exit(f"Error: invalid port in '{raw}'")
-    return raw, None
+    return raw, None, None
 
 
 def run(args):
@@ -583,11 +668,13 @@ def run(args):
     targets       = [parse_target(t) for t in args.targets]
     multi         = len(targets) > 1
 
-    # Build watchers (event callbacks wired up after displays are created)
     watchers = []
-    for host, port in targets:
+    for display_name, port, url in targets:
         port = port or args.port
-        watchers.append(HostWatcher(host, port, args.interval, on_event=None))
+        watchers.append(HostWatcher(
+            display_name, port, url, args.interval,
+            on_event=None, alert_rtt=args.alert_rtt,
+        ))
 
     if multi:
         display = TableDisplay(watchers, log_file=args.log)
@@ -596,12 +683,19 @@ def run(args):
             ts  = now.strftime("%H:%M:%S")
             tgt = c(_C.WHITE, f"[{watcher.target}]")
             if event_type == "down":
-                display.add_event(f"{tgt}  {c(_C.RED+_C.BOLD, 'DOWN')} — host went unreachable at {ts}")
+                display.add_event(f"{tgt}  {c(_C.RED+_C.BOLD, 'DOWN')} — unreachable at {ts}")
             elif event_type == "up":
                 display.add_event(f"{tgt}  {c(_C.GREEN+_C.BOLD, 'UP')} — restored after {c(_C.YELLOW, fmt_long(extra))}")
             elif event_type == "init":
                 status = c(_C.GREEN, "UP") if watcher.is_up else c(_C.RED, "DOWN")
                 display.add_event(f"{tgt}  initial status: {status}")
+            elif event_type == "rtt_alert":
+                display.add_event(
+                    f"{tgt}  {c(_C.YELLOW+_C.BOLD, 'SLOW')} — "
+                    f"RTT {extra:.1f}ms exceeds {watcher.alert_rtt:.0f}ms threshold"
+                )
+            elif event_type == "rtt_ok":
+                display.add_event(f"{tgt}  {c(_C.GREEN, 'RTT OK')} — back to {extra:.1f}ms")
 
     else:
         disp = SingleDisplay(watchers[0], log_file=args.log)
@@ -629,13 +723,10 @@ def run(args):
     signal.signal(signal.SIGINT,  shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
-    # Start all watcher threads
     for w in watchers:
         w.start()
 
-    # Display loop
     if multi:
-        # Wait for first results before drawing
         time.sleep(args.interval + 0.5)
         while True:
             display.redraw()
@@ -660,6 +751,8 @@ examples:
   checkup 8.8.8.8
   checkup 8.8.8.8 1.1.1.1 192.168.1.1          # monitor multiple hosts
   checkup google.com:443 10.0.0.1:22            # TCP port check per host
+  checkup https://mysite.com                    # HTTP/HTTPS availability check
+  checkup https://mysite.com --alert-rtt 200    # alert if response > 200ms
   checkup 10.0.0.1 --port 80                    # TCP check, single host
   checkup 8.8.8.8 --interval 1 --log uptime.log
         """,
@@ -668,7 +761,7 @@ examples:
         "targets",
         nargs="+",
         metavar="TARGET",
-        help="host(s) to monitor — use host:port for TCP checks (e.g. google.com:443)",
+        help="host(s) to monitor — IP, hostname, host:port, or http(s):// URL",
     )
     p.add_argument("-i", "--interval", type=float, default=2.0, metavar="SEC",
                    help="seconds between checks (default: 2.0, min: 0.5)")
@@ -676,6 +769,8 @@ examples:
                    help="append plain-text log to FILE")
     p.add_argument("-p", "--port", type=int, default=None, metavar="PORT",
                    help="TCP port to check on all hosts (overridden by per-host :port)")
+    p.add_argument("--alert-rtt", type=float, default=None, metavar="MS",
+                   help="alert when RTT exceeds this threshold in milliseconds")
     p.add_argument("--no-color", action="store_true",
                    help="disable ANSI color output")
     p.add_argument("-v", "--version", action="version", version=f"checkup {__version__}")
