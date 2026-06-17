@@ -5,10 +5,10 @@ Zero external dependencies. Python 3.6+ standard library only.
 https://github.com/vgrigolaia/checkup
 
 Usage:
-  checkup.py 8.8.8.8
-  checkup.py 8.8.8.8 1.1.1.1 192.168.1.1        # multi-host
-  checkup.py google.com:443 10.0.0.1:22          # TCP port check per host
-  checkup.py 10.0.0.1 --interval 1 --log out.log
+  checkup 8.8.8.8
+  checkup 8.8.8.8 1.1.1.1 192.168.1.1        # multi-host
+  checkup google.com:443 10.0.0.1:22          # TCP port check per host
+  checkup 10.0.0.1 --interval 1 --log out.log
 """
 
 import argparse
@@ -657,11 +657,11 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 examples:
-  checkup.py 8.8.8.8
-  checkup.py 8.8.8.8 1.1.1.1 192.168.1.1          # monitor multiple hosts
-  checkup.py google.com:443 10.0.0.1:22            # TCP port check per host
-  checkup.py 10.0.0.1 --port 80                    # TCP check, single host
-  checkup.py 8.8.8.8 --interval 1 --log uptime.log
+  checkup 8.8.8.8
+  checkup 8.8.8.8 1.1.1.1 192.168.1.1          # monitor multiple hosts
+  checkup google.com:443 10.0.0.1:22            # TCP port check per host
+  checkup 10.0.0.1 --port 80                    # TCP check, single host
+  checkup 8.8.8.8 --interval 1 --log uptime.log
         """,
     )
     p.add_argument(

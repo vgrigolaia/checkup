@@ -7,6 +7,11 @@ __pycache__/
 *.py[cod]
 *.pyo
 
+# Build artifacts
+dist/
+*.egg-info/
+build/
+
 # Temp files created by the Bash version
 /tmp/checkup_incidents_*.tmp
 
