@@ -7,15 +7,17 @@
 #
 # Usage:  checkup.sh <TARGET> [OPTIONS]
 # Options:
-#   -i, --interval SEC   seconds between pings (default: 2, min: 1)
-#   -l, --log FILE       append log to FILE
-#       --no-color       disable ANSI colors
-#   -v, --version        print version and exit
-#   -h, --help           print this help and exit
+#   -i, --interval SEC    seconds between checks (default: 2, min: 1)
+#   -p, --port PORT       TCP port to check instead of ICMP ping
+#   -l, --log FILE        append log to FILE
+#       --alert-rtt MS    alert when RTT exceeds this threshold (ms)
+#       --no-color        disable ANSI colors
+#   -v, --version         print version and exit
+#   -h, --help            print this help and exit
 
 set -uo pipefail
 
-VERSION="1.2.0"
+VERSION="1.3.0"
 
 # ---------------------------------------------------------------------------
 # ANSI colors — disabled when stdout is not a TTY
@@ -32,9 +34,10 @@ fi
 # Globals
 # ---------------------------------------------------------------------------
 TARGET=""
-PORT=""          # TCP port — empty means ICMP ping
+PORT=""
 INTERVAL=2
 LOG_FILE=""
+ALERT_RTT=""       # integer ms threshold or empty
 
 SESSION_START=""
 SESSION_START_EPOCH=0
@@ -48,6 +51,10 @@ PING_SUCCESS=0
 TOTAL_DOWNTIME=0
 INCIDENT_COUNT=0
 UPTIME_START_EPOCH=0
+
+LAST_RTT=""        # RTT of last successful check (integer ms)
+RTT_OVER_LIMIT=false
+RTT_ALERT_COUNT=0
 
 INCIDENT_FILE="/tmp/checkup_incidents_$$.tmp"
 ON_LIVE_LINE=false
@@ -76,7 +83,6 @@ disable_color() {
 
 strip_ansi() { sed 's/\x1b\[[0-9;]*m//g'; }
 
-# Print a timestamped line — always ends any live line first
 print_line() {
     local msg="$1"
     [[ "$ON_LIVE_LINE" == true ]] && { echo; ON_LIVE_LINE=false; }
@@ -89,7 +95,6 @@ print_line() {
     fi
 }
 
-# Print a sub-line without a timestamp (indented detail lines)
 print_sub() {
     local msg="$1"
     [[ "$ON_LIVE_LINE" == true ]] && { echo; ON_LIVE_LINE=false; }
@@ -100,7 +105,6 @@ print_sub() {
     fi
 }
 
-# Overwrite current terminal line in place
 live_line() {
     printf "\r  %b   " "$1"
     ON_LIVE_LINE=true
@@ -140,18 +144,31 @@ fmt_long() {
 }
 
 # ---------------------------------------------------------------------------
-# Check (ICMP ping or TCP connect)
+# Check — sets LAST_RTT (integer ms, or empty on failure), echoes UP/DOWN
 # ---------------------------------------------------------------------------
-do_ping() {
+do_check() {
+    LAST_RTT=""
     if [[ -n "$PORT" ]]; then
-        # TCP connect check via /dev/tcp (bash built-in, no extra deps)
+        local start_ns end_ns
+        start_ns=$(date +%s%N 2>/dev/null) || start_ns=0
         if (timeout 2 bash -c "echo >/dev/tcp/${TARGET}/${PORT}") >/dev/null 2>&1; then
+            if [[ "$start_ns" != "0" ]]; then
+                end_ns=$(date +%s%N 2>/dev/null) || end_ns=0
+                [[ "$end_ns" != "0" ]] && LAST_RTT=$(( (end_ns - start_ns) / 1000000 ))
+            fi
             echo "UP"
         else
             echo "DOWN"
         fi
     else
-        if ping -c 1 -W 2 "$TARGET" >/dev/null 2>&1; then
+        local output
+        output=$(ping -c 1 -W 2 "$TARGET" 2>/dev/null)
+        if [[ $? -eq 0 ]]; then
+            local raw_rtt
+            raw_rtt=$(echo "$output" | grep -oE 'time[=<][0-9.]+' | grep -oE '[0-9.]+' | head -1)
+            if [[ -n "$raw_rtt" ]]; then
+                LAST_RTT=$(printf "%.0f" "$raw_rtt" 2>/dev/null) || LAST_RTT=""
+            fi
             echo "UP"
         else
             echo "DOWN"
@@ -161,6 +178,25 @@ do_ping() {
 
 check_label() {
     if [[ -n "$PORT" ]]; then echo "TCP:${PORT}"; else echo "ICMP"; fi
+}
+
+# ---------------------------------------------------------------------------
+# RTT alert check — called after each successful UP check
+# ---------------------------------------------------------------------------
+check_rtt_alert() {
+    [[ -z "$ALERT_RTT" || -z "$LAST_RTT" ]] && return
+    if (( LAST_RTT > ALERT_RTT )); then
+        if [[ "$RTT_OVER_LIMIT" == false ]]; then
+            RTT_OVER_LIMIT=true
+            RTT_ALERT_COUNT=$(( RTT_ALERT_COUNT + 1 ))
+            print_line "${YELLOW}${BOLD}[ SLOW ]${RESET}  RTT spike: ${YELLOW}${LAST_RTT}ms${RESET} exceeds ${YELLOW}${ALERT_RTT}ms${RESET} threshold"
+        fi
+    else
+        if [[ "$RTT_OVER_LIMIT" == true ]]; then
+            RTT_OVER_LIMIT=false
+            print_line "${GREEN}${BOLD}[  OK  ]${RESET}  RTT back to normal: ${GREEN}${LAST_RTT}ms${RESET}"
+        fi
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -176,7 +212,8 @@ print_header() {
     print_line "  Check Method    : ${WHITE}$(check_label)${RESET}"
     print_line "  Session Started : ${WHITE}${SESSION_START}${RESET}"
     print_line "  Ping Interval   : ${WHITE}${INTERVAL}s${RESET}"
-    [[ -n "$LOG_FILE" ]] && print_line "  Log File        : ${WHITE}${LOG_FILE}${RESET}"
+    [[ -n "$ALERT_RTT" ]] && print_line "  RTT Alert       : ${YELLOW}${ALERT_RTT}ms${RESET}"
+    [[ -n "$LOG_FILE"  ]] && print_line "  Log File        : ${WHITE}${LOG_FILE}${RESET}"
     echo -e "${BOLD}${CYAN}$(printf -- '-%.0s' $(seq 1 $w))${RESET}"
     echo
 }
@@ -200,8 +237,11 @@ print_summary() {
     echo -e "${BOLD}${WHITE}  SESSION SUMMARY${RESET}"
     echo -e "${BOLD}${CYAN}$(printf '=%.0s' $(seq 1 60))${RESET}"
     print_line "  Session Duration : $(fmt_long "$session_secs")"
-    print_line "  Pings Sent       : ${PING_COUNT}"
+    print_line "  Checks Sent      : ${PING_COUNT}"
     print_line "  Packet Loss      : ${loss_pct}%"
+    if [[ -n "$ALERT_RTT" ]]; then
+        print_line "  RTT Alerts       : ${RTT_ALERT_COUNT} spike(s) above ${ALERT_RTT}ms"
+    fi
     echo
 
     if [[ ! -s "$INCIDENT_FILE" ]]; then
@@ -239,24 +279,25 @@ Usage: checkup.sh <TARGET> [OPTIONS]
 
 Continuously monitor network connectivity to a host.
 Shows when it goes down, for how long, and when it comes back up.
-Use --port for a TCP connect check instead of ICMP ping.
 
 Arguments:
-  TARGET              IP address or hostname to monitor
+  TARGET                IP address or hostname to monitor
 
 Options:
-  -i, --interval SEC  seconds between checks (default: 2, minimum: 1)
-  -p, --port PORT     TCP port to check instead of ICMP ping
-  -l, --log FILE      append plain-text log to FILE
-      --no-color      disable ANSI color output
-  -v, --version       print version and exit
-  -h, --help          print this help and exit
+  -i, --interval SEC    seconds between checks (default: 2, minimum: 1)
+  -p, --port PORT       TCP port to check instead of ICMP ping
+  -l, --log FILE        append plain-text log to FILE
+      --alert-rtt MS    alert when RTT exceeds this threshold in milliseconds
+      --no-color        disable ANSI color output
+  -v, --version         print version and exit
+  -h, --help            print this help and exit
 
 Examples:
   checkup.sh 8.8.8.8
   checkup.sh 10.20.20.10 --interval 1
   checkup.sh google.com --port 443
   checkup.sh 192.168.1.1 --port 22 --interval 2 --log uptime.log
+  checkup.sh 8.8.8.8 --alert-rtt 100
 EOF
 }
 
@@ -274,16 +315,20 @@ parse_args() {
 
     while (( $# > 0 )); do
         case "$1" in
-            -i|--interval) INTERVAL="${2:?'--interval requires a value'}"; shift 2 ;;
-            -p|--port)     PORT="${2:?'--port requires a value'}"; shift 2 ;;
-            -l|--log)      LOG_FILE="${2:?'--log requires a value'}"; shift 2 ;;
-            --no-color)    disable_color; shift ;;
+            -i|--interval)  INTERVAL="${2:?'--interval requires a value'}"; shift 2 ;;
+            -p|--port)      PORT="${2:?'--port requires a value'}"; shift 2 ;;
+            -l|--log)       LOG_FILE="${2:?'--log requires a value'}"; shift 2 ;;
+            --alert-rtt)    ALERT_RTT="${2:?'--alert-rtt requires a value'}"; shift 2 ;;
+            --no-color)     disable_color; shift ;;
             *) echo "Unknown option: $1" >&2; print_usage; exit 1 ;;
         esac
     done
 
     if (( INTERVAL < 1 )); then
         echo "Error: --interval must be >= 1 second" >&2; exit 1
+    fi
+    if [[ -n "$ALERT_RTT" ]] && ! [[ "$ALERT_RTT" =~ ^[0-9]+$ ]]; then
+        echo "Error: --alert-rtt must be a positive integer (milliseconds)" >&2; exit 1
     fi
 }
 
@@ -300,14 +345,17 @@ main() {
 
     print_header
 
-    # First ping — establish baseline
-    STATE=$(do_ping)
+    # First check — establish baseline
+    STATE=$(do_check)
     PING_COUNT=$(( PING_COUNT + 1 ))
 
     if [[ "$STATE" == "UP" ]]; then
         PING_SUCCESS=$(( PING_SUCCESS + 1 ))
         UPTIME_START_EPOCH=$(date +%s)
-        print_line "${GREEN}${BOLD}[  UP  ]${RESET}  Host is ${GREEN}ALIVE${RESET}"
+        local rtt_str=""
+        [[ -n "$LAST_RTT" ]] && rtt_str="  (RTT: ${LAST_RTT}ms)"
+        print_line "${GREEN}${BOLD}[  UP  ]${RESET}  Host is ${GREEN}ALIVE${RESET}${rtt_str}"
+        check_rtt_alert
     else
         DOWNTIME_START_TS=$(date '+%Y-%m-%d %H:%M:%S')
         DOWNTIME_START_EPOCH=$(date +%s)
@@ -322,7 +370,7 @@ main() {
         sleep "$INTERVAL"
 
         local new_state now now_epoch
-        new_state=$(do_ping)
+        new_state=$(do_check)
         now=$(date '+%Y-%m-%d %H:%M:%S')
         now_epoch=$(date +%s)
 
@@ -334,6 +382,7 @@ main() {
             DOWNTIME_START_TS="$now"
             DOWNTIME_START_EPOCH="$now_epoch"
             UPTIME_START_EPOCH=0
+            RTT_OVER_LIMIT=false
             echo
             separator
             print_line "${RED}${BOLD}[ DOWN ]${RESET}  Host went ${RED}UNREACHABLE${RESET}"
@@ -354,14 +403,20 @@ main() {
             echo
             UPTIME_START_EPOCH="$now_epoch"
             echo "${DOWNTIME_START_TS}|${now}|${dur}" >> "$INCIDENT_FILE"
+            check_rtt_alert
 
-        # Steady UP — live status ticker
+        # Steady UP — live ticker with RTT and optional alert indicator
         elif [[ "$STATE" == "UP" && "$new_state" == "UP" ]]; then
-            local up_for=""
+            check_rtt_alert
+            local rtt_str="" up_for="" alert_str=""
+            [[ -n "$LAST_RTT" ]] && rtt_str="  (RTT: ${LAST_RTT}ms)"
             if (( UPTIME_START_EPOCH > 0 )); then
                 up_for="  up $(fmt_short $(( now_epoch - UPTIME_START_EPOCH )))"
             fi
-            live_line "${GREEN}●${RESET}  ${now}  Host is ${GREEN}ALIVE${RESET}${DIM}${up_for}${RESET}"
+            if [[ "$RTT_OVER_LIMIT" == true && -n "$ALERT_RTT" ]]; then
+                alert_str="${YELLOW}  ⚠ >${ALERT_RTT}ms${RESET}"
+            fi
+            live_line "${GREEN}●${RESET}  ${now}  Host is ${GREEN}ALIVE${RESET}${rtt_str}${DIM}${up_for}${RESET}${alert_str}"
 
         # Steady DOWN — elapsed counter
         elif [[ "$STATE" == "DOWN" && "$new_state" == "DOWN" ]]; then
