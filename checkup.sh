@@ -144,34 +144,32 @@ fmt_long() {
 }
 
 # ---------------------------------------------------------------------------
-# Check — sets LAST_RTT (integer ms, or empty on failure), echoes UP/DOWN
+# Check — sets globals LAST_RTT (integer ms or empty) and CHECK_STATE (UP/DOWN)
+# Must be called directly (not via $(...)) so globals survive to the parent shell.
 # ---------------------------------------------------------------------------
 do_check() {
     LAST_RTT=""
+    CHECK_STATE="DOWN"
     if [[ -n "$PORT" ]]; then
         local start_ns end_ns
         start_ns=$(date +%s%N 2>/dev/null) || start_ns=0
         if (timeout 2 bash -c "echo >/dev/tcp/${TARGET}/${PORT}") >/dev/null 2>&1; then
+            CHECK_STATE="UP"
             if [[ "$start_ns" != "0" ]]; then
                 end_ns=$(date +%s%N 2>/dev/null) || end_ns=0
                 [[ "$end_ns" != "0" ]] && LAST_RTT=$(( (end_ns - start_ns) / 1000000 ))
             fi
-            echo "UP"
-        else
-            echo "DOWN"
         fi
     else
         local output
         output=$(ping -c 1 -W 2 "$TARGET" 2>/dev/null)
         if [[ $? -eq 0 ]]; then
+            CHECK_STATE="UP"
             local raw_rtt
             raw_rtt=$(echo "$output" | grep -oE 'time[=<][0-9.]+' | grep -oE '[0-9.]+' | head -1)
             if [[ -n "$raw_rtt" ]]; then
                 LAST_RTT=$(printf "%.0f" "$raw_rtt" 2>/dev/null) || LAST_RTT=""
             fi
-            echo "UP"
-        else
-            echo "DOWN"
         fi
     fi
 }
@@ -346,7 +344,8 @@ main() {
     print_header
 
     # First check — establish baseline
-    STATE=$(do_check)
+    do_check
+    STATE="$CHECK_STATE"
     PING_COUNT=$(( PING_COUNT + 1 ))
 
     if [[ "$STATE" == "UP" ]]; then
@@ -370,7 +369,8 @@ main() {
         sleep "$INTERVAL"
 
         local new_state now now_epoch
-        new_state=$(do_check)
+        do_check
+        new_state="$CHECK_STATE"
         now=$(date '+%Y-%m-%d %H:%M:%S')
         now_epoch=$(date +%s)
 
