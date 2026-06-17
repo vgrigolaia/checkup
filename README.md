@@ -1,7 +1,7 @@
 # checkup — Network Uptime Monitor
 
 > Lightweight, zero-dependency network uptime monitor for Linux.  
-> Detects outages, measures downtime, tracks multiple hosts, and produces clean human-readable reports — with no `pip install` required.
+> Detects outages, measures downtime, tracks multiple hosts, and produces clean human-readable reports — with no extra `pip install` required.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.6+](https://img.shields.io/badge/python-3.6%2B-blue.svg)](https://www.python.org/)
@@ -13,7 +13,7 @@
 
 ## Features
 
-- **Zero dependencies** — Python standard library only; no `pip install` ever needed
+- **Zero dependencies** — Python standard library only; no `pip install` ever needed to run
 - **Multi-host monitoring** — watch multiple IPs/hostnames in a single live table
 - **TCP port check** — connect to a specific port instead of ICMP ping (useful for hosts that block ping)
 - **Dual implementation** — Python (`checkup.py`) and Bash (`checkup.sh`) versions
@@ -28,38 +28,103 @@
 
 ---
 
+## Installation
+
+### Option 1 — One-line install (recommended)
+
+Downloads `checkup` and installs it to `/usr/local/bin` so you can run it from anywhere:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/vgrigolaia/checkup/main/install.sh | bash
+```
+
+After install:
+
+```bash
+checkup --version
+checkup 8.8.8.8
+```
+
+To uninstall:
+
+```bash
+sudo rm /usr/local/bin/checkup
+```
+
+---
+
+### Option 2 — pip / pipx
+
+```bash
+pip install checkup
+```
+
+Or with [pipx](https://pipx.pypa.io/) (recommended for CLI tools — installs in an isolated environment):
+
+```bash
+pipx install checkup
+```
+
+After install:
+
+```bash
+checkup --version
+checkup 8.8.8.8
+```
+
+To uninstall:
+
+```bash
+pip uninstall checkup
+# or
+pipx uninstall checkup
+```
+
+---
+
+### Option 3 — Run directly (no install)
+
+If you just want to run it without installing:
+
+```bash
+git clone https://github.com/vgrigolaia/checkup.git
+cd checkup
+chmod +x checkup.py checkup.sh
+
+./checkup.py 8.8.8.8
+./checkup.sh 8.8.8.8
+```
+
+---
+
 ## Quick Start
 
 ```bash
-# Clone
-git clone https://github.com/vgrigolaia/checkup.git
-cd checkup
+# Single host — ICMP ping
+checkup 8.8.8.8
 
-# Make executable
-chmod +x checkup.py checkup.sh
+# Multiple hosts at once
+checkup 8.8.8.8 1.1.1.1 192.168.1.1
 
-# Monitor a single host
-./checkup.py 8.8.8.8
+# TCP port check per host
+checkup google.com:443 10.0.0.1:22
 
-# Monitor multiple hosts
-./checkup.py 8.8.8.8 1.1.1.1 192.168.1.1
-
-# TCP port check
-./checkup.py google.com:443 10.0.0.1:22
+# Save events to a log file
+checkup 8.8.8.8 --log /var/log/checkup.log
 ```
 
 ---
 
 ## Usage
 
-### Python version (recommended)
+### Python version (installed as `checkup`, or run as `./checkup.py`)
 
 ```
-./checkup.py <TARGET [TARGET ...]> [OPTIONS]
+checkup <TARGET [TARGET ...]> [OPTIONS]
 
 Arguments:
   TARGET     IP or hostname to monitor. Use host:port for TCP check.
-             Multiple targets enable multi-host table mode.
+             Multiple targets enable multi-host live table mode.
 
 Options:
   -i, --interval SEC    seconds between checks  (default: 2.0, min: 0.5)
@@ -70,7 +135,7 @@ Options:
   -h, --help            print help and exit
 ```
 
-### Bash version
+### Bash version (`./checkup.sh`)
 
 ```
 ./checkup.sh <TARGET> [OPTIONS]
@@ -85,7 +150,7 @@ Options:
 ```
 
 > **Note:** Multi-host table mode is available in the Python version only.  
-> The Bash version supports single-host monitoring with TCP port check.
+> The Bash version supports single-host monitoring with optional TCP port check.
 
 ---
 
@@ -93,30 +158,30 @@ Options:
 
 ```bash
 # Single host — ICMP ping, default 2-second interval
-./checkup.py 8.8.8.8
+checkup 8.8.8.8
 
 # Single host — TCP connect check on port 443
-./checkup.py google.com:443
+checkup google.com:443
 
-# Single host — TCP check, global port flag
-./checkup.py 10.0.0.1 --port 22
+# Single host — TCP check via global port flag
+checkup 10.0.0.1 --port 22
 
 # Multi-host — ICMP for all
-./checkup.py 8.8.8.8 1.1.1.1 192.168.1.1
+checkup 8.8.8.8 1.1.1.1 192.168.1.1
 
 # Multi-host — mixed ICMP and TCP per host
-./checkup.py 8.8.8.8 google.com:443 10.0.0.1:22 192.168.1.1
+checkup 8.8.8.8 google.com:443 10.0.0.1:22 192.168.1.1
+
+# Faster checks — 1-second interval
+checkup 8.8.8.8 --interval 1
 
 # Save log to file
-./checkup.py 192.168.1.1 --interval 2 --log gateway.log
-
-# 1-second interval, log everything
-./checkup.py 8.8.8.8 1.1.1.1 --interval 1 --log uptime.log
+checkup 192.168.1.1 --interval 2 --log gateway.log
 
 # Run in the background (headless)
-nohup ./checkup.py 8.8.8.8 --log /var/log/checkup.log &
+nohup checkup 8.8.8.8 --log /var/log/checkup.log &
 
-# Bash version — TCP check
+# Bash version — TCP check on port 80
 ./checkup.sh 192.168.1.1 --port 80 --interval 2 --log uptime.log
 ```
 
@@ -125,6 +190,7 @@ nohup ./checkup.py 8.8.8.8 --log /var/log/checkup.log &
 ## Output
 
 ### Single host
+
 ```
 ============================================================
   checkup  —  Network Uptime Monitor
@@ -154,6 +220,7 @@ nohup ./checkup.py 8.8.8.8 --log /var/log/checkup.log &
 ```
 
 ### Multi-host (live table, redraws every tick)
+
 ```
 ====================================================================
   checkup  —  Network Uptime Monitor        2026-06-16 14:25:34
@@ -177,6 +244,7 @@ nohup ./checkup.py 8.8.8.8 --log /var/log/checkup.log &
 ```
 
 ### Session summary on Ctrl+C
+
 ```
 ============================================================
   SESSION SUMMARY
@@ -204,10 +272,10 @@ nohup ./checkup.py 8.8.8.8 --log /var/log/checkup.log &
 
 | Syntax | Method | When to use |
 |---|---|---|
-| `checkup.py 8.8.8.8` | ICMP ping | Default — works for most hosts |
-| `checkup.py 8.8.8.8 --port 80` | TCP connect | Host blocks ICMP; check HTTP port |
-| `checkup.py google.com:443` | TCP connect | Per-host port in multi-host mode |
-| `checkup.sh host --port 22` | TCP connect | SSH availability check |
+| `checkup 8.8.8.8` | ICMP ping | Default — works for most hosts |
+| `checkup 8.8.8.8 --port 80` | TCP connect | Host blocks ICMP; check HTTP port |
+| `checkup google.com:443` | TCP connect | Per-host port in multi-host mode |
+| `checkup.sh host --port 22` | TCP connect | Bash version SSH availability check |
 
 ---
 
@@ -216,11 +284,11 @@ nohup ./checkup.py 8.8.8.8 --log /var/log/checkup.log &
 ### Simple background process
 
 ```bash
-nohup ./checkup.py 8.8.8.8 --interval 2 --log /var/log/checkup.log &
+nohup checkup 8.8.8.8 --interval 2 --log /var/log/checkup.log &
 echo "PID: $!"
 ```
 
-### systemd service (optional)
+### systemd service
 
 Create `/etc/systemd/system/checkup.service`:
 
@@ -230,7 +298,7 @@ Description=checkup Network Uptime Monitor
 After=network.target
 
 [Service]
-ExecStart=/opt/checkup/checkup.py 8.8.8.8 1.1.1.1 --interval 2 --log /var/log/checkup.log
+ExecStart=/usr/local/bin/checkup 8.8.8.8 1.1.1.1 --interval 2 --log /var/log/checkup.log
 Restart=on-failure
 RestartSec=5
 StandardOutput=null
@@ -255,16 +323,21 @@ sudo journalctl -u checkup -f
 | **Bash** | Bash 4+, `ping`, `date`, `awk` (all standard on Linux) |
 | **System** | Linux (or any Unix-like OS with `ping` available) |
 
+No additional packages are needed to run checkup. `pip` / `pipx` are only needed if you choose that install method.
+
 ---
 
 ## Project Structure
 
 ```
 checkup/
-├── checkup.py       # Python implementation (recommended)
+├── checkup.py       # Python implementation (recommended, full features)
 ├── checkup.sh       # Bash implementation (single-host + TCP check)
-├── README.md        # This file
+├── install.sh       # One-line installer script
+├── pyproject.toml   # PyPI packaging config (pip install checkup)
+├── PUBLISHING.md    # Release and publishing guide
 ├── CONTRIBUTING.md  # How to contribute
+├── README.md        # This file
 ├── LICENSE          # MIT License
 └── .gitignore
 ```
@@ -274,8 +347,10 @@ checkup/
 ## Changelog
 
 ### v1.2.0
+- **One-line installer** — `curl ... | bash` installs `checkup` system-wide
+- **PyPI package** — `pip install checkup` or `pipx install checkup`
 - **Multi-host monitoring** — pass multiple targets, get a live auto-refreshing table
-- **TCP port check** — use `host:port` syntax or `--port PORT` flag to check TCP connectivity instead of ICMP
+- **TCP port check** — use `host:port` syntax or `--port PORT` flag
 - **Per-host session summary** — Ctrl+C shows RTT stats and incident log for every host
 - Bash version gains `--port` flag using `/dev/tcp` built-in (no extra deps)
 
